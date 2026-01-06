@@ -47,8 +47,30 @@ jobs:
               with open("last_checked_version.txt") as f:
                   last_tag = f.read().strip()
           
+          webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
+          
+          # 新しいリリースがない場合
           if tag == last_tag or tag == "unknown":
               print(f"No new release (current: {tag})")
+              
+              # 更新なし通知をSlackに送信
+              if webhook_url:
+                  slack_message = {
+                      "channel": "#004_claude-code",
+                      "username": "Claude Code Release Bot",
+                      "icon_emoji": ":mailbox_with_no_mail:",
+                      "blocks": [
+                          {
+                              "type": "section",
+                              "text": {
+                                  "type": "mrkdwn",
+                                  "text": f"📭 今週のClaude Code更新はありませんでした\n（現在: {tag}）"
+                              }
+                          }
+                      ]
+                  }
+                  requests.post(webhook_url, json=slack_message)
+                  print("Sent 'no update' notification")
               exit(0)
           
           print(f"New release detected: {tag}")
@@ -101,8 +123,7 @@ jobs:
               except Exception as e:
                   print(f"Error calling Claude API: {e}")
           
-          # Slack通知
-          webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
+          # Slack通知（新リリースあり）
           if webhook_url:
               slack_message = {
                   "channel": "#004_claude-code",
