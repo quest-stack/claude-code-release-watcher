@@ -1,0 +1,113 @@
+name: Check Claude Code Releases
+
+on:
+  schedule:
+    # 毎日9:00 JST (0:00 UTC) に実行
+    - cron: '0 0 * * *'
+  workflow_dispatch: # 手動実行も可能
+
+jobs:
+  check-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check for new releases
+        id: check
+        run: |
+          # 最新リリース情報を取得
+          LATEST=$(curl -s https://api.github.com/repos/anthropics/claude-code/releases/latest)
+          TAG=$(echo $LATEST | jq -r '.tag_name')
+          PUBLISHED=$(echo $LATEST | jq -r '.published_at')
+          BODY=$(echo $LATEST | jq -r '.body')
+          URL=$(echo $LATEST | jq -r '.html_url')
+          
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "published=$PUBLISHED" >> $GITHUB_OUTPUT
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          
+          # 本文をファイルに保存（改行対応）
+          echo "$BODY" > /tmp/release_body.txt
+          
+          # 前回チェックしたバージョンと比較
+          LAST_TAG=""
+          if [ -f last_checked_version.txt ]; then
+            LAST_TAG=$(cat last_checked_version.txt)
+          fi
+          
+          if [ "$TAG" != "$LAST_TAG" ] && [ "$TAG" != "null" ]; then
+            echo "new_release=true" >> $GITHUB_OUTPUT
+            echo "🚀 新しいリリースを検出: $TAG"
+          else
+            echo "new_release=false" >> $GITHUB_OUTPUT
+            echo "📭 新しいリリースなし（現在: $TAG）"
+          fi
+
+      - name: Notify Slack
+        if: steps.check.outputs.new_release == 'true'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          TAG="${{ steps.check.outputs.tag }}"
+          URL="${{ steps.check.outputs.url }}"
+          PUBLISHED="${{ steps.check.outputs.published }}"
+          BODY=$(cat /tmp/release_body.txt | head -c 1500 | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\n/g')
+          
+          # 重要なキーワードをハイライト
+          HIGHLIGHTS=""
+          if cat /tmp/release_body.txt | grep -qi "tool.search\|mcp\|token"; then
+            HIGHLIGHTS="\n\n⭐ *注目:* MCP/Tool Search関連の更新が含まれている可能性があります！"
+          fi
+          
+          # Slack通知を送信
+          curl -X POST "$SLACK_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"channel\": \"#004_claude-code\",
+              \"username\": \"Claude Code Release Bot\",
+              \"icon_emoji\": \":rocket:\",
+              \"blocks\": [
+                {
+                  \"type\": \"header\",
+                  \"text\": {
+                    \"type\": \"plain_text\",
+                    \"text\": \"🚀 Claude Code ${TAG} がリリースされました！\",
+                    \"emoji\": true
+                  }
+                },
+                {
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \"*リリース日時:* ${PUBLISHED}\n*詳細:* <${URL}|GitHub Release Page>${HIGHLIGHTS}\"
+                  }
+                },
+                {
+                  \"type\": \"divider\"
+                },
+                {
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \"*変更内容（抜粋）:*\n\`\`\`${BODY}\`\`\`\"
+                  }
+                }
+              ]
+            }"
+          
+          echo "✅ Slack通知を送信しました"
+
+      - name: Update last checked version
+        if: steps.check.outputs.new_release == 'true'
+        run: |
+          echo "${{ steps.check.outputs.tag }}" > last_checked_version.txt
+
+      - name: Commit version file
+        if: steps.check.outputs.new_release == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add last_checked_version.txt
+          git commit -m "chore: update last checked version to ${{ steps.check.outputs.tag }}" || true
+          git push || true
