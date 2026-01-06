@@ -2,9 +2,8 @@ name: Check Claude Code Releases
 
 on:
   schedule:
-    # 毎日9:00 JST (0:00 UTC) に実行
     - cron: '0 0 * * *'
-  workflow_dispatch: # 手動実行も可能
+  workflow_dispatch:
 
 jobs:
   check-release:
@@ -13,126 +12,142 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Check for new releases
-        id: check
-        run: |
-          # 最新リリース情報を取得
-          LATEST=$(curl -s https://api.github.com/repos/anthropics/claude-code/releases/latest)
-          TAG=$(echo $LATEST | jq -r '.tag_name')
-          PUBLISHED=$(echo $LATEST | jq -r '.published_at')
-          BODY=$(echo $LATEST | jq -r '.body')
-          URL=$(echo $LATEST | jq -r '.html_url')
-          
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "published=$PUBLISHED" >> $GITHUB_OUTPUT
-          echo "url=$URL" >> $GITHUB_OUTPUT
-          
-          # 本文をファイルに保存
-          echo "$BODY" > /tmp/release_body.txt
-          
-          # 前回チェックしたバージョンと比較
-          LAST_TAG=""
-          if [ -f last_checked_version.txt ]; then
-            LAST_TAG=$(cat last_checked_version.txt)
-          fi
-          
-          if [ "$TAG" != "$LAST_TAG" ] && [ "$TAG" != "null" ]; then
-            echo "new_release=true" >> $GITHUB_OUTPUT
-            echo "🚀 新しいリリースを検出: $TAG"
-          else
-            echo "new_release=false" >> $GITHUB_OUTPUT
-            echo "📭 新しいリリースなし（現在: $TAG）"
-          fi
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-      - name: Summarize in Japanese with Claude
-        if: steps.check.outputs.new_release == 'true'
-        id: summarize
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Check and notify
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          BODY=$(cat /tmp/release_body.txt)
-          TAG="${{ steps.check.outputs.tag }}"
-          
-          # Claude Haiku APIで日本語要約を生成
-          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
-            -H "Content-Type: application/json" \
-            -H "x-api-key: $ANTHROPIC_API_KEY" \
-            -H "anthropic-version: 2023-06-01" \
-            -d "{
-              \"model\": \"claude-3-5-haiku-20241022\",
-              \"max_tokens\": 1024,
-              \"messages\": [{
-                \"role\": \"user\",
-                \"content\": \"以下はClaude Code ${TAG}のリリースノートです。日本語で簡潔に要約してください。\n\n重要なポイント:\n- 新機能は何か\n- 改善点は何か\n- 特にMCP、Tool Search、トークン削減に関する内容があれば強調\n\n出力形式:\n📦 主な新機能:\n- xxx\n\n🔧 改善・修正:\n- xxx\n\n⭐ 注目ポイント:\n- xxx（あれば）\n\nリリースノート:\n${BODY}\"
-              }]
-            }")
-          
-          # 要約を抽出してファイルに保存
-          echo "$RESPONSE" | jq -r '.content[0].text' > /tmp/summary_ja.txt
-          
-          echo "✅ 日本語要約を生成しました"
-          cat /tmp/summary_ja.txt
-
-      - name: Notify Slack
-        if: steps.check.outputs.new_release == 'true'
-        env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
-          TAG="${{ steps.check.outputs.tag }}"
-          URL="${{ steps.check.outputs.url }}"
-          PUBLISHED="${{ steps.check.outputs.published }}"
-          
-          # 日本語要約を読み込み（エスケープ処理）
-          SUMMARY_JA=$(cat /tmp/summary_ja.txt | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\n/g')
-          
-          # Slack通知を送信
-          curl -X POST "$SLACK_WEBHOOK_URL" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"channel\": \"#004_claude-code\",
-              \"username\": \"Claude Code Release Bot\",
-              \"icon_emoji\": \":rocket:\",
-              \"blocks\": [
-                {
-                  \"type\": \"header\",
-                  \"text\": {
-                    \"type\": \"plain_text\",
-                    \"text\": \"🚀 Claude Code ${TAG} がリリースされました！\",
-                    \"emoji\": true
-                  }
-                },
-                {
-                  \"type\": \"section\",
-                  \"text\": {
-                    \"type\": \"mrkdwn\",
-                    \"text\": \"*リリース日時:* ${PUBLISHED}\n*詳細:* <${URL}|GitHub Release Page>\"
-                  }
-                },
-                {
-                  \"type\": \"divider\"
-                },
-                {
-                  \"type\": \"section\",
-                  \"text\": {
-                    \"type\": \"mrkdwn\",
-                    \"text\": \"${SUMMARY_JA}\"
-                  }
-                }
-              ]
-            }"
-          
-          echo "✅ Slack通知を送信しました"
+          python << 'PYEOF'
+          import requests
+          import json
+          import os
 
-      - name: Update last checked version
-        if: steps.check.outputs.new_release == 'true'
-        run: |
-          echo "${{ steps.check.outputs.tag }}" > last_checked_version.txt
+          # 最新リリース取得
+          resp = requests.get("https://api.github.com/repos/anthropics/claude-code/releases/latest")
+          release = resp.json()
+          
+          tag = release.get("tag_name", "unknown")
+          url = release.get("html_url", "")
+          published = release.get("published_at", "")
+          body = release.get("body", "No release notes")
+          
+          print(f"Latest release: {tag}")
+          
+          # 前回のバージョンを確認
+          last_tag = ""
+          if os.path.exists("last_checked_version.txt"):
+              with open("last_checked_version.txt") as f:
+                  last_tag = f.read().strip()
+          
+          if tag == last_tag or tag == "unknown":
+              print(f"No new release (current: {tag})")
+              exit(0)
+          
+          print(f"New release detected: {tag}")
+          
+          # Claude Haikuで日本語要約
+          api_key = os.environ.get("ANTHROPIC_API_KEY")
+          summary_ja = "（要約を取得できませんでした）"
+          
+          if api_key:
+              try:
+                  prompt = f"""以下はClaude Code {tag}のリリースノートです。日本語で簡潔に要約してください。
+
+          重要なポイント:
+          - 新機能は何か
+          - 改善点は何か
+          - 特にMCP、Tool Search、トークン削減に関する内容があれば強調
+
+          出力形式:
+          📦 主な新機能:
+          • xxx
+
+          🔧 改善・修正:
+          • xxx
+
+          ⭐ 注目ポイント:
+          • xxx（あれば）
+
+          リリースノート:
+          {body[:3000]}"""
+                  
+                  resp = requests.post(
+                      "https://api.anthropic.com/v1/messages",
+                      headers={
+                          "Content-Type": "application/json",
+                          "x-api-key": api_key,
+                          "anthropic-version": "2023-06-01"
+                      },
+                      json={
+                          "model": "claude-3-5-haiku-20241022",
+                          "max_tokens": 1024,
+                          "messages": [{"role": "user", "content": prompt}]
+                      }
+                  )
+                  result = resp.json()
+                  if "content" in result and len(result["content"]) > 0:
+                      summary_ja = result["content"][0]["text"]
+                      print("Summary generated successfully")
+                  else:
+                      print(f"API response: {result}")
+              except Exception as e:
+                  print(f"Error calling Claude API: {e}")
+          
+          # Slack通知
+          webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
+          if webhook_url:
+              slack_message = {
+                  "channel": "#004_claude-code",
+                  "username": "Claude Code Release Bot",
+                  "icon_emoji": ":rocket:",
+                  "blocks": [
+                      {
+                          "type": "header",
+                          "text": {
+                              "type": "plain_text",
+                              "text": f"🚀 Claude Code {tag} がリリースされました！",
+                              "emoji": True
+                          }
+                      },
+                      {
+                          "type": "section",
+                          "text": {
+                              "type": "mrkdwn",
+                              "text": f"*リリース日時:* {published}\n*詳細:* <{url}|GitHub Release Page>"
+                          }
+                      },
+                      {"type": "divider"},
+                      {
+                          "type": "section",
+                          "text": {
+                              "type": "mrkdwn",
+                              "text": summary_ja[:2900]
+                          }
+                      }
+                  ]
+              }
+              
+              resp = requests.post(webhook_url, json=slack_message)
+              print(f"Slack notification sent: {resp.status_code}")
+          
+          # バージョン保存
+          with open("last_checked_version.txt", "w") as f:
+              f.write(tag)
+          print(f"Saved version: {tag}")
+          PYEOF
 
       - name: Commit version file
-        if: steps.check.outputs.new_release == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add last_checked_version.txt
-          git commit -m "chore: update last checked version to ${{ steps.check.outputs.tag }}" || true
+          git add last_checked_version.txt || true
+          git diff --staged --quiet || git commit -m "chore: update last checked version"
           git push || true
