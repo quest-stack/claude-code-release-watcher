@@ -5,12 +5,17 @@ on:
     - cron: '0 1 * * 6'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   check-release:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -21,6 +26,7 @@ jobs:
         run: pip install requests
 
       - name: Check and notify
+        id: check
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -47,10 +53,12 @@ jobs:
               with open("last_checked_version.txt") as f:
                   last_tag = f.read().strip()
           
+          print(f"Last checked: {last_tag}")
+          
           webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
           
           # 新しいリリースがない場合
-          if tag == last_tag or tag == "unknown":
+          if tag == last_tag:
               print(f"No new release (current: {tag})")
               
               # 更新なし通知をSlackに送信
@@ -71,9 +79,16 @@ jobs:
                   }
                   requests.post(webhook_url, json=slack_message)
                   print("Sent 'no update' notification")
+              
+              # 新リリースなしを示すフラグ
+              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                  f.write("new_release=false\n")
               exit(0)
           
           print(f"New release detected: {tag}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("new_release=true\n")
+              f.write(f"tag={tag}\n")
           
           # Claude Haikuで日本語要約
           api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -166,9 +181,10 @@ jobs:
           PYEOF
 
       - name: Commit version file
+        if: steps.check.outputs.new_release == 'true'
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add last_checked_version.txt || true
-          git diff --staged --quiet || git commit -m "chore: update last checked version"
-          git push || true
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add last_checked_version.txt
+          git commit -m "chore: update last checked version to ${{ steps.check.outputs.tag }}" || echo "No changes to commit"
+          git push
