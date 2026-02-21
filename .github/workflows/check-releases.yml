@@ -125,26 +125,31 @@ jobs:
 
           if api_key:
               try:
-                  prompt = f"""以下はClaude Codeの直近1週間のリリースノート（{len(new_releases)}件）です。
-          全バージョンの変更点をまとめて日本語で要約してください。
+                  prompt = f"""あなたはClaude Codeの週次アップデートレポーターです。
+          以下は直近1週間にリリースされた{len(new_releases)}バージョン分のリリースノートです。
 
-          重要なポイント:
-          - 新機能は何か
-          - 改善点は何か
-          - バグ修正は何か
-          - 特にMCP、パフォーマンス、UX改善に関する内容があれば強調
+          ## 要約ルール
+          1. 1週間の「最終的な成果」だけを抽出すること。途中バージョンで入ったバグとその修正は相殺して省略。
+             例: v2.1.45で機能Aを追加 → v2.1.46で機能Aのバグ修正 → 「機能Aが追加された」とだけ書く
+          2. ユーザーにとって実際に影響がある変更に絞る（内部リファクタリングは省略可）
+          3. 各項目は1行で簡潔に。補足が必要なら括弧書きで短く
+          4. 日本語で書く
 
-          出力形式:
-          :package: 主な新機能:
+          ## 出力形式（Slack mrkdwn記法）
+          *:sparkles: 新機能*
+          • xxx
           • xxx
 
-          :wrench: 改善・修正:
+          *:chart_with_upwards_trend: 改善*
           • xxx
 
-          :star: 注目ポイント:
-          • xxx（あれば）
+          *:warning: 破壊的変更・注意点*
+          • xxx（あれば。なければこのセクション省略）
 
-          リリースノート:
+          *:bulb: 一言まとめ*
+          今週は○○が中心のアップデート。特に△△は要チェック。
+
+          ## リリースノート（古い順）
           {combined_notes[:6000]}"""
 
                   resp = requests.post(
@@ -173,7 +178,7 @@ jobs:
           if webhook_url:
               count = len(new_releases)
               oldest_tag = new_releases[-1]["tag_name"]
-              header_text = f":rocket: Claude Code 週次アップデート（{count}件: {oldest_tag} → {latest_tag}）"
+              header_text = f":rocket: Claude Code 週次まとめ ({oldest_tag} → {latest_tag})"
 
               blocks = [
                   {
@@ -185,11 +190,13 @@ jobs:
                       }
                   },
                   {
-                      "type": "section",
-                      "text": {
-                          "type": "mrkdwn",
-                          "text": f"*対象バージョン:*\n{release_list_text}"
-                      }
+                      "type": "context",
+                      "elements": [
+                          {
+                              "type": "mrkdwn",
+                              "text": f"対象: {count}バージョン | {release_list_text.strip()}"
+                          }
+                      ]
                   },
                   {"type": "divider"},
                   {
