@@ -35,33 +35,51 @@ jobs:
           import requests
           import json
           import os
+          from datetime import datetime, timedelta, timezone
 
-          # 最新リリース取得
-          resp = requests.get("https://api.github.com/repos/anthropics/claude-code/releases/latest")
-          release = resp.json()
-          
-          tag = release.get("tag_name", "unknown")
-          url = release.get("html_url", "")
-          published = release.get("published_at", "")
-          body = release.get("body", "No release notes")
-          
-          print(f"Latest release: {tag}")
-          
-          # 前回のバージョンを確認
+          # 直近のリリースを最大20件取得
+          resp = requests.get(
+              "https://api.github.com/repos/anthropics/claude-code/releases",
+              params={"per_page": 20}
+          )
+          all_releases = resp.json()
+
+          # 前回チェックしたバージョンを確認
           last_tag = ""
           if os.path.exists("last_checked_version.txt"):
               with open("last_checked_version.txt") as f:
                   last_tag = f.read().strip()
-          
+
           print(f"Last checked: {last_tag}")
-          
+
+          # 直近7日間の新リリースを抽出
+          one_week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+          new_releases = []
+
+          for rel in all_releases:
+              tag = rel.get("tag_name", "")
+              published_str = rel.get("published_at", "")
+              if not published_str:
+                  continue
+              published_dt = datetime.fromisoformat(published_str.replace("Z", "+00:00"))
+
+              # 前回チェック済みのバージョンに到達したら終了
+              if tag == last_tag:
+                  break
+              # 7日以内のリリースのみ
+              if published_dt >= one_week_ago:
+                  new_releases.append(rel)
+
+          latest_tag = all_releases[0].get("tag_name", "unknown") if all_releases else "unknown"
+          print(f"Latest release: {latest_tag}")
+          print(f"New releases in past 7 days: {len(new_releases)}")
+
           webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
-          
+
           # 新しいリリースがない場合
-          if tag == last_tag:
-              print(f"No new release (current: {tag})")
-              
-              # 更新なし通知をSlackに送信
+          if not new_releases:
+              print(f"No new releases (current: {latest_tag})")
+
               if webhook_url:
                   slack_message = {
                       "channel": "#004_claude-code",
@@ -72,50 +90,63 @@ jobs:
                               "type": "section",
                               "text": {
                                   "type": "mrkdwn",
-                                  "text": f"📭 今週のClaude Code更新はありませんでした\n（現在: {tag}）"
+                                  "text": f":mailbox_with_no_mail: 今週のClaude Code更新はありませんでした\n（現在: {latest_tag}）"
                               }
                           }
                       ]
                   }
                   requests.post(webhook_url, json=slack_message)
                   print("Sent 'no update' notification")
-              
-              # 新リリースなしを示すフラグ
+
               with open(os.environ["GITHUB_OUTPUT"], "a") as f:
                   f.write("new_release=false\n")
               exit(0)
-          
-          print(f"New release detected: {tag}")
+
+          # 新リリースあり
+          print(f"New releases detected: {[r['tag_name'] for r in new_releases]}")
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write("new_release=true\n")
-              f.write(f"tag={tag}\n")
-          
-          # Claude Haikuで日本語要約
+              f.write(f"tag={latest_tag}\n")
+
+          # 全リリースノートを結合
+          combined_notes = ""
+          release_list_text = ""
+          for rel in reversed(new_releases):  # 古い順
+              tag = rel.get("tag_name", "")
+              body = rel.get("body", "No release notes")
+              published = rel.get("published_at", "")[:10]
+              url = rel.get("html_url", "")
+              combined_notes += f"\n\n--- {tag} ({published}) ---\n{body}"
+              release_list_text += f"• <{url}|{tag}> ({published})\n"
+
+          # Claude Haiku 4.5で日本語要約
           api_key = os.environ.get("ANTHROPIC_API_KEY")
           summary_ja = "（要約を取得できませんでした）"
-          
+
           if api_key:
               try:
-                  prompt = f"""以下はClaude Code {tag}のリリースノートです。日本語で簡潔に要約してください。
+                  prompt = f"""以下はClaude Codeの直近1週間のリリースノート（{len(new_releases)}件）です。
+          全バージョンの変更点をまとめて日本語で要約してください。
 
           重要なポイント:
           - 新機能は何か
           - 改善点は何か
-          - 特にMCP、Tool Search、トークン削減に関する内容があれば強調
+          - バグ修正は何か
+          - 特にMCP、パフォーマンス、UX改善に関する内容があれば強調
 
           出力形式:
-          📦 主な新機能:
+          :package: 主な新機能:
           • xxx
 
-          🔧 改善・修正:
+          :wrench: 改善・修正:
           • xxx
 
-          ⭐ 注目ポイント:
+          :star: 注目ポイント:
           • xxx（あれば）
 
           リリースノート:
-          {body[:3000]}"""
-                  
+          {combined_notes[:6000]}"""
+
                   resp = requests.post(
                       "https://api.anthropic.com/v1/messages",
                       headers={
@@ -124,8 +155,8 @@ jobs:
                           "anthropic-version": "2023-06-01"
                       },
                       json={
-                          "model": "claude-3-5-haiku-20241022",
-                          "max_tokens": 1024,
+                          "model": "claude-haiku-4-5-20251001",
+                          "max_tokens": 2048,
                           "messages": [{"role": "user", "content": prompt}]
                       }
                   )
@@ -137,47 +168,53 @@ jobs:
                       print(f"API response: {result}")
               except Exception as e:
                   print(f"Error calling Claude API: {e}")
-          
-          # Slack通知（新リリースあり）
+
+          # Slack通知（週次まとめ）
           if webhook_url:
+              count = len(new_releases)
+              oldest_tag = new_releases[-1]["tag_name"]
+              header_text = f":rocket: Claude Code 週次アップデート（{count}件: {oldest_tag} → {latest_tag}）"
+
+              blocks = [
+                  {
+                      "type": "header",
+                      "text": {
+                          "type": "plain_text",
+                          "text": header_text,
+                          "emoji": True
+                      }
+                  },
+                  {
+                      "type": "section",
+                      "text": {
+                          "type": "mrkdwn",
+                          "text": f"*対象バージョン:*\n{release_list_text}"
+                      }
+                  },
+                  {"type": "divider"},
+                  {
+                      "type": "section",
+                      "text": {
+                          "type": "mrkdwn",
+                          "text": summary_ja[:2900]
+                      }
+                  }
+              ]
+
               slack_message = {
                   "channel": "#004_claude-code",
                   "username": "Claude Code Release Bot",
                   "icon_emoji": ":rocket:",
-                  "blocks": [
-                      {
-                          "type": "header",
-                          "text": {
-                              "type": "plain_text",
-                              "text": f"🚀 Claude Code {tag} がリリースされました！",
-                              "emoji": True
-                          }
-                      },
-                      {
-                          "type": "section",
-                          "text": {
-                              "type": "mrkdwn",
-                              "text": f"*リリース日時:* {published}\n*詳細:* <{url}|GitHub Release Page>"
-                          }
-                      },
-                      {"type": "divider"},
-                      {
-                          "type": "section",
-                          "text": {
-                              "type": "mrkdwn",
-                              "text": summary_ja[:2900]
-                          }
-                      }
-                  ]
+                  "blocks": blocks
               }
-              
+
               resp = requests.post(webhook_url, json=slack_message)
               print(f"Slack notification sent: {resp.status_code}")
-          
-          # バージョン保存
+
+          # 最新バージョンを保存
           with open("last_checked_version.txt", "w") as f:
-              f.write(tag)
-          print(f"Saved version: {tag}")
+              f.write(latest_tag)
+          print(f"Saved version: {latest_tag}")
           PYEOF
 
       - name: Commit version file
